@@ -1,3 +1,5 @@
+#pragma once
+
 #include <string>
 #include <cstring>
 #include <cstdint>
@@ -34,13 +36,23 @@ int write_full(int fd, const char *buf, size_t n)
     return 0;
 }
 
-int send_msg(int fd, const string &msg)
+string make_packet(const string &msg)
 {
     uint32_t len = msg.size();
     string packet(4, '\0');
     memcpy(&packet[0], &len, 4);
     packet += msg;
+    return packet;
+}
 
+int send_msg(int fd, const string &msg)
+{
+    if (msg.size() > MAX_MSG)
+    {
+        cerr << "message too long, not sent" << endl;
+        return -1;
+    }
+    string packet = make_packet(msg);
     return write_full(fd, packet.data(), packet.size());
 }
 

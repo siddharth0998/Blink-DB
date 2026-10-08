@@ -30,21 +30,27 @@ int main()
         perror("connect failed");
         return 1;
     }
+    cout << "Connected! Type 'bye' to leave." << endl;
 
-    while(true){
+    while (true)
+    {
         // 4. send a msg
         string msg;
         cout << "Client: ";
-        getline(cin, msg);
-
-        if (send_msg(fd, msg) < 0){
+        if (!getline(cin, msg))
+            break;
+        if (msg == "bye")
+            break;
+        if (send_msg(fd, msg) < 0)
+        {
             cerr << "Failed to send." << endl;
             break;
         }
 
         // 5. read the reply
         string reply;
-        if(recv_msg(fd,reply) < 0){
+        if (recv_msg(fd, reply) < 0)
+        {
             cerr << "Server left the chat." << endl;
             break;
         }
