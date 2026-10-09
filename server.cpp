@@ -1,6 +1,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <map>
 #include <cerrno>
 #include <csignal>
 #include <cstdlib>
@@ -65,6 +66,47 @@ Conn *handle_accept(int server_fd)
     return conn;
 }
 
+map<string, string> g_data;
+
+struct Response
+{
+    uint32_t status = RES_OK;
+    string data;
+};
+
+void do_request(const vector<string> &cmd, Response &resp)
+{
+    if (cmd.size() == 2 && cmd[0] == "get")
+    {
+        auto it = g_data.find(cmd[1]);
+        if (it == g_data.end())
+        {
+            resp.status = RES_OK;
+            return;
+        }
+        resp.data = it->second;
+    }
+    else if (cmd.size() == 3 && cmd[0] == "set")
+    {
+        g_data[cmd[1]] = cmd[2];
+    }
+    else if (cmd.size() == 2 && cmd[0] == "del")
+    {
+        g_data.erase(cmd[1]);
+    }
+    else
+    {
+        resp.status = RES_ERR;
+    }
+}
+
+string short_text(const string &s)
+{
+    if (s.size() <= 40)
+        return s;
+    return s.substr(0, 40) + "... (" + to_string(s.size()) + " bytes";
+}
+
 bool try_one_message(Conn *conn)
 {
     if (conn->incoming.size() < 4)
@@ -87,9 +129,26 @@ bool try_one_message(Conn *conn)
         return false;
     }
 
-    string msg = conn->incoming.substr(4, len);
-    cout << "Client " << conn->fd << ": " << msg << endl;
-    conn->outgoing += make_packet(msg);
+    string body = conn->incoming.substr(4, len);
+    vector<string> cmd;
+    if (!parse_request(body, cmd))
+    {
+        cerr << "Client " << conn->fd << ": bad request" << endl;
+        conn->want_close = true;
+        return false;
+    }
+
+    cout << "Client " << conn->fd << ":";
+    for (const string &s : cmd)
+    {
+        cout << " " << short_text(s);
+    }
+    cout << endl;
+
+    Response resp;
+    do_request(cmd, resp);
+    string reply = make_response_body(resp.status, resp.data);
+    conn->outgoing += make_packet(reply);
     conn->incoming.erase(0, 4 + len);
     return true;
 }
@@ -190,7 +249,7 @@ int main()
         return 1;
     }
 
-    cout << "Server is running on port " << ntohs(addr.sin_port) << "..." << endl;
+    cout << "key-value server is running on port " << ntohs(addr.sin_port) << "..." << endl;
 
     vector<Conn *> fd2conn;
     vector<pollfd> poll_args;
