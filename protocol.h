@@ -1,115 +1,108 @@
 #pragma once
 
 #include <string>
-#include <cstring>
+#include <vector>
 #include <cstdint>
-#include <iostream>
-#include <unistd.h>
 
 using namespace std;
 
 const size_t MAX_MSG = 32 << 20; // 32MB
 const size_t MAX_ARGS = 200 * 1000;
 
-const uint32_t RES_OK = 0;
-const uint32_t RES_ERR = 1;
-const uint32_t RES_NX = 2;
+const int PARSE_OK = 1;
+const int PARSE_INCOMPLETE = 0;
+const int PARSE_ERROR = -1;
 
-// out = "ab" , value = 3 -> out = "ab"[3]
-void append_u32(string &out, uint32_t value)
+int read_number_line(const string &buf, size_t &pos, char prefix, long long &out)
 {
-    string bytes(4, '\0');
-    memcpy(&bytes[0], &value, 4);
-    out += bytes;
-}
-
-// data = [3][5] , pos = 0 , out -> out = 3 , pos = 4 , returns true (false if fewer than 4 bytes are left)
-bool read_u32(const string &data, size_t &pos, uint32_t &out)
-{
-    if (pos + 4 > data.size())
-        return false;
-    memcpy(&out, &data[pos], 4);
-    pos += 4;
-    return true;
-}
-
-// data = "xxhello" , pos = 2, n = 5 , out -> out = "hello" , pos = 7 , return true/false.
-bool read_str(const string &data, size_t &pos, size_t n, string &out)
-{
-    if (pos + n > data.size())
-        return false;
-    out = data.substr(pos, n);
-    pos += n;
-    return true;
-}
-
-// body = "hello" -> returns [5]hello
-string make_packet(const string &body)
-{
-    string packet;
-    append_u32(packet, body.size());
-    packet += body;
-    return packet;
-}
-
-// client uses it
-//  cmd = {"set","name","sid"} -> [3][3]set[4]name[3]sid
-string make_request_body(const vector<string> &cmd)
-{
-    string body;
-    append_u32(body, cmd.size());
-    for (const string &s : cmd)
+    if (pos >= buf.size())
     {
-        append_u32(body, s.size());
-        body += s;
+        return PARSE_INCOMPLETE;
     }
-    return body;
+    if (buf[pos] != prefix)
+    {
+        return PARSE_ERROR;
+    }
+    size_t end = buf.find("\r\n", pos);
+    if (end == string::npos)
+    {
+        if (buf.size() - pos > 32)
+        {
+            return PARSE_ERROR;
+        }
+        return PARSE_INCOMPLETE;
+    }
+    string digits = buf.substr(pos + 1, end - pos - 1);
+    if (digits.empty() || digits.size() > 18)
+    {
+        return PARSE_ERROR;
+    }
+    for (char c : digits)
+    {
+        if (c < '0' || c > '9')
+        {
+            return PARSE_ERROR;
+        }
+    }
+    out = stoll(digits);
+    pos = end + 2;
+    return PARSE_OK;
 }
 
-// server uses it
-//  body = [3][3]set[4]name[3]sid , cmd -> cmd = {"set","name","sid"}, return true/false
-bool parse_request(const string &body, vector<string> &cmd)
+int parse_resp_request(const string &buf, vector<string> &cmd, size_t &consumed)
 {
     size_t pos = 0;
-    uint32_t nstr = 0;
-    if (!read_u32(body, pos, nstr))
-        return false;
-    if (nstr > MAX_ARGS)
-        return false;
-
-    while (cmd.size() < nstr)
+    long long count = 0;
+    int r = read_number_line(buf, pos, '*', count);
+    if (r != PARSE_OK)
     {
-        uint32_t len = 0;
-        if (!read_u32(body, pos, len))
-            return false;
-        string s;
-        if (!read_str(body, pos, len, s))
-            return false;
-        cmd.push_back(s);
+        return r;
+    }
+    if (count < 1 || count > (long long)MAX_ARGS)
+    {
+        return PARSE_ERROR;
     }
 
-    if (pos != body.size())
-        return false;
-    return true;
+    for (long long i = 0; i < count; i++)
+    {
+        long long len = 0;
+        r = read_number_line(buf, pos, '$', len);
+        if (r != PARSE_OK)
+            return r;
+        if (len > (long long)MAX_MSG)
+            return PARSE_ERROR;
+        if (buf.size() < pos + len + 2)
+            return PARSE_INCOMPLETE;
+        if (buf[pos + len] != '\r' || buf[pos + len + 1] != '\n')
+            return PARSE_ERROR;
+        cmd.push_back(buf.substr(pos, len));
+        pos += len + 2;
+    }
+    consumed = pos;
+    return PARSE_OK;
 }
 
-// server uses it
-// status = RES_OK , data = "sid" -> [0]sid
-string make_response_body(uint32_t status, const string &data)
+void reply_simple(string &out, const string &s)
 {
-    string body;
-    append_u32(body, status);
-    body += data;
-    return body;
+    out += "+" + s + "\r\n";
 }
 
-// client uses it
-// body = [0]sid -> status = 0 , data = "sid" , return true/false.
-bool parse_response(const string &body, uint32_t &status, string &data)
+void reply_error(string &out, const string &msg)
 {
-    size_t pos = 0;
-    if (!read_u32(body, pos, status))
-        return false;
-    data = body.substr(pos);
-    return true;
+    out += "-" + msg + "\r\n";
+}
+
+void reply_integer(string &out, long long n)
+{
+    out += ":" + to_string(n) + "\r\n";
+}
+
+void reply_bulk(string &out, const string &s)
+{
+    out += "$" + to_string(s.size()) + "\r\n" + s + "\r\n";
+}
+
+void reply_null(string &out)
+{
+    out += "$-1\r\n";
 }

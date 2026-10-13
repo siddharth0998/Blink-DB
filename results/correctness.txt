@@ -1,0 +1,31 @@
+> ping
+PONG
+> get name
+(nil)
+> set name sid
+OK
+> get name
+"sid"
+> SET Name Siddharth
+OK
+> GET Name
+"Siddharth"
+> set city new delhi
+OK
+> get city
+"new delhi"
+> del name city missing
+(integer) 2
+> get name
+(nil)
+> get
+(error) ERR wrong number of arguments for 'get' command
+> set onlykey
+(error) ERR wrong number of arguments for 'set' command
+> hello
+(error) ERR unknown command 'hello'
+> pipelined: 3 commands sent in one write
++PONG
++OK
+$1
+v

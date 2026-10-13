@@ -4,6 +4,7 @@
 #include <map>
 #include <cerrno>
 #include <csignal>
+#include <cctype>
 #include <cstdlib>
 #include <unistd.h>
 #include <fcntl.h>
@@ -12,8 +13,14 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "protocol.h"
+#include <unordered_map>
+#include <chrono>
+#include <sys/resource.h>
 
 using namespace std;
+
+unordered_map<string, string> g_data;
+long long g_requests = 0;
 
 struct Conn
 {
@@ -24,6 +31,40 @@ struct Conn
     string incoming;
     string outgoing;
 };
+
+void report_stats()
+{
+    using Clock = chrono::steady_clock;
+    static Clock::time_point last_time = Clock::now();
+    static long long last_requests = 0;
+    static double last_user = 0;
+    static double last_sys = 0;
+
+    double elapsed = chrono::duration<double>(Clock::now() - last_time).count();
+    if (elapsed < 1.0)
+    {
+        return;
+    }
+
+    rusage ru{};
+    getrusage(RUSAGE_SELF, &ru);
+    double user = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6;
+    double sys = ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
+
+    long long handled = g_requests - last_requests;
+    if (handled > 0)
+    {
+        int user_pct = (user - last_user) / elapsed * 100;
+        int sys_pct = (sys - last_sys) / elapsed * 100;
+        cerr << "[stats] " << (long long)(handled / elapsed) << " req/s   CPU "
+             << user_pct + sys_pct << "% = user " << user_pct << "% + sys " << sys_pct << "%" << endl;
+    }
+
+    last_time = Clock::now();
+    last_requests = g_requests;
+    last_user = user;
+    last_sys = sys;
+}
 
 void set_nonblocking(int fd)
 {
@@ -66,37 +107,62 @@ Conn *handle_accept(int server_fd)
     return conn;
 }
 
-map<string, string> g_data;
-
-struct Response
+string to_lower(string s)
 {
-    uint32_t status = RES_OK;
-    string data;
-};
-
-void do_request(const vector<string> &cmd, Response &resp)
-{
-    if (cmd.size() == 2 && cmd[0] == "get")
+    for (char &c : s)
     {
-        auto it = g_data.find(cmd[1]);
-        if (it == g_data.end())
+        c = tolower((unsigned char)c);
+    }
+    return s;
+}
+
+void do_request(const vector<string> &cmd, string &out)
+{
+    string name = to_lower(cmd[0]);
+    if (name == "ping")
+    {
+        reply_simple(out, "PONG");
+    }
+    else if (name == "get")
+    {
+        if (cmd.size() != 2)
         {
-            resp.status = RES_OK;
+            reply_error(out, "ERR wrong number of arguments for 'get' command");
             return;
         }
-        resp.data = it->second;
+        auto it = g_data.find(cmd[1]);
+        if (it == g_data.end())
+            reply_null(out);
+        else
+            reply_bulk(out, it->second);
     }
-    else if (cmd.size() == 3 && cmd[0] == "set")
+    else if (name == "set")
     {
+        if (cmd.size() != 3)
+        {
+            reply_error(out, "ERR wrong number of arguments for 'set' command");
+            return;
+        }
         g_data[cmd[1]] = cmd[2];
+        reply_simple(out, "OK");
     }
-    else if (cmd.size() == 2 && cmd[0] == "del")
+    else if (name == "del")
     {
-        g_data.erase(cmd[1]);
+        if (cmd.size() < 2)
+        {
+            reply_error(out, "ERR wrong number of arguments for 'del' command");
+            return;
+        }
+        long long deleted = 0;
+        for (size_t i = 1; i < cmd.size(); i++)
+        {
+            deleted += g_data.erase(cmd[i]);
+        }
+        reply_integer(out, deleted);
     }
     else
     {
-        resp.status = RES_ERR;
+        reply_error(out, "ERR unknown command '" + cmd[0] + "'");
     }
 }
 
@@ -109,47 +175,23 @@ string short_text(const string &s)
 
 bool try_one_message(Conn *conn)
 {
-    if (conn->incoming.size() < 4)
-    {
-        return false;
-    }
-
-    uint32_t len = 0;
-    memcpy(&len, &conn->incoming[0], 4);
-
-    if (len > MAX_MSG)
-    {
-        cerr << "Client " << conn->fd << ": message too long" << endl;
-        conn->want_close = true;
-        return false;
-    }
-
-    if (conn->incoming.size() < 4 + len)
-    {
-        return false;
-    }
-
-    string body = conn->incoming.substr(4, len);
     vector<string> cmd;
-    if (!parse_request(body, cmd))
+    size_t consumed = 0;
+    int r = parse_resp_request(conn->incoming, cmd, consumed);
+
+    if (r == PARSE_INCOMPLETE)
     {
-        cerr << "Client " << conn->fd << ": bad request" << endl;
+        return false;
+    }
+    if (r == PARSE_ERROR)
+    {
+        cerr << "Client " << conn->fd << ": protocol error" << endl;
         conn->want_close = true;
         return false;
     }
-
-    cout << "Client " << conn->fd << ":";
-    for (const string &s : cmd)
-    {
-        cout << " " << short_text(s);
-    }
-    cout << endl;
-
-    Response resp;
-    do_request(cmd, resp);
-    string reply = make_response_body(resp.status, resp.data);
-    conn->outgoing += make_packet(reply);
-    conn->incoming.erase(0, 4 + len);
+    do_request(cmd, conn->outgoing);
+    g_requests++;
+    conn->incoming.erase(0, consumed);
     return true;
 }
 
@@ -212,8 +254,9 @@ void handle_read(Conn *conn)
     }
 }
 
-int main()
+int main(int argc, char *argv[])
 {
+    bool show_stats = (argc > 1 && string(argv[1]) == "--stats");
     signal(SIGPIPE, SIG_IGN);
 
     // 1. create socket
@@ -271,7 +314,8 @@ int main()
             poll_args.push_back(pfd);
         }
 
-        int rv = poll(poll_args.data(), (nfds_t)poll_args.size(), -1);
+        int timeout_ms = show_stats ? 1000 : -1;
+        int rv = poll(poll_args.data(), (nfds_t)poll_args.size(), timeout_ms);
         if (rv < 0 && errno == EINTR)
             continue;
         if (rv < 0)
@@ -316,6 +360,10 @@ int main()
                 fd2conn[conn->fd] = nullptr;
                 delete conn;
             }
+        }
+        if (show_stats)
+        {
+            report_stats();
         }
     }
     close(server_fd);
