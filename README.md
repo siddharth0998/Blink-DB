@@ -2,7 +2,7 @@
 
 A Redis-like in-memory key-value store written from scratch in C++.
 
-BlinkDB speaks **RESP2**, the Redis wire protocol, so the standard Redis tools work with it unchanged: `redis-cli`, `redis-benchmark` and `memtier_benchmark`. It runs as a single thread with a non-blocking `poll()` event loop, and it supports pipelining.
+BlinkDB speaks **RESP2**, the Redis wire protocol, so the standard Redis tools work with it unchanged: `redis-cli` and `redis-benchmark`. It runs as a single thread with a non-blocking `poll()` event loop, and it supports pipelining.
 
 ## Features
 
@@ -85,83 +85,43 @@ The server replies `+OK\r\n`. Other reply types are `-ERR ...` (error), `:1` (in
 
 ## Benchmarks: BlinkDB vs Redis
 
-Setup:
-
-- Both servers ran on the same MacBook, over loopback (127.0.0.1). The machine details are in `results/machine.txt`.
-- Redis ran with persistence turned off (`--save "" --appendonly no`), because BlinkDB doesn't write to disk either.
-- Redis is single-threaded for commands, like BlinkDB.
-- Each number comes from a single run, so expect a few percent of noise.
-
-### 1. Realistic workload (memtier_benchmark)
-
-The traffic is shaped like a real cache, not a synthetic one:
-
-- 90% GET and 10% SET, mixed together
-- Zipf key popularity (a few hot keys)
-- 100,000 keys, loaded before the test
-- Value sizes of 100 B (50%), 1 KB (35%) and 10 KB (15%)
-- 100 connections, no pipelining, 30 seconds
-
-| | BlinkDB | Redis |
-|---|---|---|
-| Throughput (ops/sec) | **286,566** | 286,120 |
-| Avg latency | 0.349 ms | 0.349 ms |
-| p50 | **0.311 ms** | 0.343 ms |
-| p99 | 0.719 ms | **0.599 ms** |
-| p99.9 | 1.583 ms | **1.119 ms** |
-| Data moved | 523 MB/s | 516 MB/s |
-| GET misses | 0 | 0 |
-
-BlinkDB matches Redis on throughput and typical latency. Redis has tighter tail latency (p99.9).
-
-### 2. Pipelined, small values (redis-benchmark)
-
-`-c 10 -P 128 -d 16 -r 100000 -n 3000000`
-
-| | BlinkDB SET | Redis SET | BlinkDB GET | Redis GET |
-|---|---|---|---|---|
-| Requests/sec | **2,737,285** | 2,202,690 | 2,976,254 | **3,191,558** |
-| p50 | **0.407 ms** | 0.535 ms | 0.375 ms | **0.359 ms** |
-| p99 | 0.871 ms | **0.727 ms** | 0.791 ms | **0.415 ms** |
-| max | 6.103 ms | **2.447 ms** | **1.007 ms** | 1.127 ms |
-
-### 3. 1000 clients, 512-byte values (redis-benchmark)
-
-`-c 1000 -P 64 -d 512 -r 100000 -n 1000000`
-
-| | BlinkDB SET | Redis SET | BlinkDB GET | Redis GET |
-|---|---|---|---|---|
-| Requests/sec | 1,096,491 | **1,293,661** | **1,655,629** | 1,483,680 |
-| p50 | 53.5 ms | **24.6 ms** | **36.1 ms** | 38.8 ms |
-| p99 | 80.1 ms | **70.7 ms** | **57.7 ms** | 77.2 ms |
-| max | 871.9 ms | **78.2 ms** | 595.5 ms | **82.4 ms** |
-
-### What the numbers show
-
-- **Without pipelining, the round trip dominates.** At pipeline 1, both servers reach about 286k ops/sec. That figure is exactly what Little's Law predicts: 100 requests in flight ÷ 0.349 ms. Most of each request's time goes to system calls and the kernel, not to the server's own work.
-- **Pipelining gives about a 10× speed-up.** Sending many requests per `read()` and `write()` lets one system call cover the cost of many commands.
-- **BlinkDB does less work per command than Redis.** This is why it can be faster on simple GET/SET. Redis also does work BlinkDB skips, such as expiry checks, statistics and LRU tracking.
-- **Redis wins on tail latency**, especially with large values and many clients. The likely causes in BlinkDB are listed under known limitations below.
-
-### Raw results
-
-The raw output of every test is in `results/`. To reproduce it, start both servers, then:
+Start BlinkDB:
 
 ```bash
-# pipelined, small values
-redis-benchmark -p 1234 -t set,get -n 3000000 -c 10 -P 128 -d 16 -r 100000 --csv
-# 1000 clients, 512-byte values
-redis-benchmark -p 1234 -t set,get -n 1000000 -c 1000 -P 64 -d 512 -r 100000 --csv
-# realistic: load the data, then run the mixed workload
-memtier_benchmark -s 127.0.0.1 -p 1234 --ratio=1:0 --key-pattern=P:P --key-maximum=100000 --key-prefix="user:" --data-size-list=100:50,1000:35,10000:15 -R -t 4 -c 25 --requests=allkeys --hide-histogram
-memtier_benchmark -s 127.0.0.1 -p 1234 --ratio=1:10 --key-pattern=Z:Z --key-maximum=100000 --key-prefix="user:" --data-size-list=100:50,1000:35,10000:15 -R -t 4 -c 25 --test-time=30 --hide-histogram --print-percentiles=50,99,99.9
+g++ -std=c++17 -O2 server.cpp -o /tmp/server && /tmp/server --stats > /dev/null
 ```
 
-For Redis, run the same commands with `-p 6380`, after starting it with:
+Start Redis:
 
 ```bash
 redis-server --port 6380 --save "" --appendonly no
 ```
+
+Benchmark BlinkDB (port 1234) and Redis (port 6380) with the same command:
+
+```bash
+redis-benchmark -p 1234 -t set,get -n 10000000 -c 1000 -P 64 -d 1024 -r 100000
+redis-benchmark -p 6380 -t set,get -n 10000000 -c 1000 -P 64 -d 1024 -r 100000
+```
+
+For the 1M runs, use `-n 1000000`.
+
+| | BlinkDB SET | Redis SET | BlinkDB GET | Redis GET | BlinkDB SET | Redis SET | BlinkDB GET | Redis GET |
+|---|---|---|---|---|---|---|---|---|
+| Total requests | 1M | 1M | 1M | 1M | 10M | 10M | 10M | 10M |
+| Concurrent clients | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 |
+| Payload | 1 KB | 1 KB | 1 KB | 1 KB | 1 KB | 1 KB | 1 KB | 1 KB |
+| Throughput | 778K/s | 1.03M/s | 1.31M/s | 1.25M/s | 804K/s | 1.10M/s | 1.40M/s | 1.20M/s |
+| Total time | 1.28 s | 0.97 s | 0.76 s | 0.80 s | 12.44 s | 9.11 s | 7.12 s | 8.32 s |
+| Avg latency | 41.0 ms | 19.4 ms | 47.0 ms | 45.5 ms | 38.5 ms | 17.7 ms | 45.4 ms | 46.8 ms |
+| Min latency | 15.5 ms | 7.8 ms | 7.0 ms | 10.1 ms | 14.7 ms | 8.8 ms | 8.5 ms | 12.6 ms |
+| p50 | 38.4 ms | 18.4 ms | 45.4 ms | 44.9 ms | 36.9 ms | 16.5 ms | 44.1 ms | 47.3 ms |
+| p95 | 67.8 ms | 27.9 ms | 59.5 ms | 64.6 ms | 50.8 ms | 25.9 ms | 52.2 ms | 58.7 ms |
+| p99 | 102.9 ms | 36.0 ms | 78.5 ms | 72.1 ms | 58.2 ms | 27.8 ms | 70.1 ms | 68.7 ms |
+| p99.99 | 724 ms | 41.4 ms | 756 ms | 75.0 ms | 372 ms | 61.0 ms | 698 ms | 90.9 ms |
+| Max latency | 724 ms | 41.4 ms | 756 ms | 75.0 ms | 734 ms | 61.3 ms | 1,116 ms | 92.0 ms |
+
+The raw output of every run is in `results/`.
 
 ## Known limitations
 
