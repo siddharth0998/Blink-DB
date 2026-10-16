@@ -19,7 +19,11 @@
 
 using namespace std;
 
-unordered_map<string, string> g_data;
+unordered_map<string, string> g_newer;
+unordered_map<string, string> g_older;
+
+const size_t MOVE_PER_REQUEST = 128;
+long long g_grows = 0;
 long long g_requests = 0;
 
 struct Conn
@@ -31,6 +35,61 @@ struct Conn
     string incoming;
     string outgoing;
 };
+
+void move_some_keys()
+{
+    size_t moved = 0;
+    while (moved < MOVE_PER_REQUEST && !g_older.empty())
+    {
+        auto node = g_older.extract(g_older.begin());
+        g_newer.insert(std::move(node));
+        moved++;
+    }
+    if (g_older.empty() && g_older.bucket_count() > 1)
+    {
+        g_older = unordered_map<string, string>();
+    }
+}
+
+void grow_if_needed()
+{
+    if (!g_older.empty())
+        return;
+    if (g_newer.size() + 1 <= g_newer.bucket_count() * g_newer.max_load_factor())
+        return;
+    g_older.swap(g_newer);
+    g_grows++;
+    g_newer = unordered_map<string, string>();
+    g_newer.reserve(g_older.size() * 2);
+}
+
+string *db_find(const string &key)
+{
+    auto it = g_newer.find(key);
+    if (it != g_newer.end())
+        return &it->second;
+    it = g_older.find(key);
+    if (it != g_older.end())
+        return &it->second;
+    return nullptr;
+}
+
+void db_set(const string &key, const string &value)
+{
+    string *old_value = db_find(key);
+    if (old_value != nullptr)
+    {
+        *old_value = value;
+        return;
+    }
+    grow_if_needed();
+    g_newer[key] = value;
+}
+
+int db_del(const string &key)
+{
+    return g_newer.erase(key) + g_older.erase(key);
+}
 
 void report_stats()
 {
@@ -57,7 +116,7 @@ void report_stats()
         int user_pct = (user - last_user) / elapsed * 100;
         int sys_pct = (sys - last_sys) / elapsed * 100;
         cerr << "[stats] " << (long long)(handled / elapsed) << " req/s   CPU "
-             << user_pct + sys_pct << "% = user " << user_pct << "% + sys " << sys_pct << "%" << endl;
+             << user_pct + sys_pct << "% = user " << user_pct << "% + sys " << sys_pct << "%" << "   keys " << g_newer.size() + g_older.size() << "   table grew " << g_grows << " times" << endl;
     }
 
     last_time = Clock::now();
@@ -119,6 +178,7 @@ string to_lower(string s)
 void do_request(const vector<string> &cmd, string &out)
 {
     string name = to_lower(cmd[0]);
+    move_some_keys();
     if (name == "ping")
     {
         reply_simple(out, "PONG");
@@ -130,11 +190,11 @@ void do_request(const vector<string> &cmd, string &out)
             reply_error(out, "ERR wrong number of arguments for 'get' command");
             return;
         }
-        auto it = g_data.find(cmd[1]);
-        if (it == g_data.end())
+        string *value = db_find(cmd[1]);
+        if (value == nullptr)
             reply_null(out);
         else
-            reply_bulk(out, it->second);
+            reply_bulk(out, *value);
     }
     else if (name == "set")
     {
@@ -143,7 +203,7 @@ void do_request(const vector<string> &cmd, string &out)
             reply_error(out, "ERR wrong number of arguments for 'set' command");
             return;
         }
-        g_data[cmd[1]] = cmd[2];
+        db_set(cmd[1], cmd[2]);
         reply_simple(out, "OK");
     }
     else if (name == "del")
@@ -156,7 +216,7 @@ void do_request(const vector<string> &cmd, string &out)
         long long deleted = 0;
         for (size_t i = 1; i < cmd.size(); i++)
         {
-            deleted += g_data.erase(cmd[i]);
+            deleted += db_del(cmd[i]);
         }
         reply_integer(out, deleted);
     }
@@ -326,13 +386,10 @@ int main(int argc, char *argv[])
 
         if (poll_args[0].revents)
         {
-            Conn *conn = handle_accept(server_fd);
-            if (conn != nullptr)
+            while (Conn *conn = handle_accept(server_fd))
             {
                 if (fd2conn.size() <= (size_t)conn->fd)
-                {
                     fd2conn.resize(conn->fd + 1, nullptr);
-                }
                 fd2conn[conn->fd] = conn;
             }
         }
