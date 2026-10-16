@@ -111,15 +111,15 @@ For the 1M runs, use `-n 1000000`.
 | Total requests | 1M | 1M | 1M | 1M | 10M | 10M | 10M | 10M |
 | Concurrent clients | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 | 1,000 |
 | Payload | 1 KB | 1 KB | 1 KB | 1 KB | 1 KB | 1 KB | 1 KB | 1 KB |
-| Throughput | 778K/s | 1.03M/s | 1.31M/s | 1.25M/s | 804K/s | 1.10M/s | 1.40M/s | 1.20M/s |
-| Total time | 1.28 s | 0.97 s | 0.76 s | 0.80 s | 12.44 s | 9.11 s | 7.12 s | 8.32 s |
-| Avg latency | 41.0 ms | 19.4 ms | 47.0 ms | 45.5 ms | 38.5 ms | 17.7 ms | 45.4 ms | 46.8 ms |
-| Min latency | 15.5 ms | 7.8 ms | 7.0 ms | 10.1 ms | 14.7 ms | 8.8 ms | 8.5 ms | 12.6 ms |
-| p50 | 38.4 ms | 18.4 ms | 45.4 ms | 44.9 ms | 36.9 ms | 16.5 ms | 44.1 ms | 47.3 ms |
-| p95 | 67.8 ms | 27.9 ms | 59.5 ms | 64.6 ms | 50.8 ms | 25.9 ms | 52.2 ms | 58.7 ms |
-| p99 | 102.9 ms | 36.0 ms | 78.5 ms | 72.1 ms | 58.2 ms | 27.8 ms | 70.1 ms | 68.7 ms |
-| p99.99 | 724 ms | 41.4 ms | 756 ms | 75.0 ms | 372 ms | 61.0 ms | 698 ms | 90.9 ms |
-| Max latency | 724 ms | 41.4 ms | 756 ms | 75.0 ms | 734 ms | 61.3 ms | 1,116 ms | 92.0 ms |
+| Throughput | 761K/s | 1.03M/s | 1.40M/s | 1.25M/s | 795K/s | 1.10M/s | 1.40M/s | 1.20M/s |
+| Total time | 1.31 s | 0.97 s | 0.72 s | 0.80 s | 12.57 s | 9.11 s | 7.16 s | 8.32 s |
+| Avg latency | 42.4 ms | 19.4 ms | 43.8 ms | 45.5 ms | 39.3 ms | 17.7 ms | 45.6 ms | 46.8 ms |
+| Min latency | 12.4 ms | 7.8 ms | 15.2 ms | 10.1 ms | 8.5 ms | 8.8 ms | 3.7 ms | 12.6 ms |
+| p50 | 39.0 ms | 18.4 ms | 42.7 ms | 44.9 ms | 38.9 ms | 16.5 ms | 44.3 ms | 47.3 ms |
+| p95 | 77.5 ms | 27.9 ms | 46.4 ms | 64.6 ms | 49.9 ms | 25.9 ms | 53.1 ms | 58.7 ms |
+| p99 | 97.9 ms | 36.0 ms | 86.7 ms | 72.1 ms | 65.3 ms | 27.8 ms | 71.9 ms | 68.7 ms |
+| p99.99 | 107 ms | 41.4 ms | 92.1 ms | 75.0 ms | 115 ms | 61.0 ms | 74.8 ms | 90.9 ms |
+| Max latency | 107 ms | 41.4 ms | 92.1 ms | 75.0 ms | 116 ms | 61.3 ms | 74.8 ms | 92.0 ms |
 
 The raw output of every run is in `results/`.
 
@@ -129,13 +129,12 @@ The raw output of every run is in `results/`.
 - **Only 4 commands.** There is no expiry (TTL) and only strings are stored. Inline commands aren't supported, so `redis-benchmark -t ping` fails on its `PING_INLINE` test.
 - **IPv4 only.** Connect to `127.0.0.1`, not `localhost`, which macOS resolves to the IPv6 address `::1`.
 - **`poll()` scans every socket** on each loop iteration. kqueue (macOS) and epoll (Linux) report only the sockets that are ready.
-- **The hash table rehashes all at once.** When `std::unordered_map` grows, it moves every key in one go, which causes latency spikes. Redis rehashes a little at a time.
 - **A per-request `erase`.** Removing each handled request from the front of the input buffer moves the remaining bytes every time. This is expensive with big pipelined values.
 
 ## Roadmap
 
 - [ ] Track a read position and trim the input buffer once per batch, instead of once per request
-- [ ] Incremental rehashing, or reserving the table size up front
+- [x] Incremental rehashing
 - [ ] Use kqueue/epoll instead of poll()
 - [ ] Expiry (`EXPIRE`, `TTL`) and more commands
 - [ ] IPv6 support
