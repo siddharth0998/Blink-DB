@@ -29,6 +29,7 @@ long long g_requests = 0;
 struct Conn
 {
     int fd = -1;
+    size_t read_pos = 0;
     bool want_read = false;
     bool want_write = false;
     bool want_close = false;
@@ -237,7 +238,7 @@ bool try_one_message(Conn *conn)
 {
     vector<string> cmd;
     size_t consumed = 0;
-    int r = parse_resp_request(conn->incoming, cmd, consumed);
+    int r = parse_resp_request(conn->incoming, cmd, consumed, conn->read_pos);
 
     if (r == PARSE_INCOMPLETE)
     {
@@ -251,7 +252,7 @@ bool try_one_message(Conn *conn)
     }
     do_request(cmd, conn->outgoing);
     g_requests++;
-    conn->incoming.erase(0, consumed);
+    conn->read_pos += consumed;
     return true;
 }
 
@@ -305,6 +306,11 @@ void handle_read(Conn *conn)
 
     while (try_one_message(conn))
         ;
+    if (conn->read_pos > 0)
+    {
+        conn->incoming.erase(0, conn->read_pos);
+        conn->read_pos = 0;
+    }
 
     if (!conn->outgoing.empty())
     {

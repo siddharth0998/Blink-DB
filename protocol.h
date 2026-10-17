@@ -49,9 +49,9 @@ int read_number_line(const string &buf, size_t &pos, char prefix, long long &out
     return PARSE_OK;
 }
 
-int parse_resp_request(const string &buf, vector<string> &cmd, size_t &consumed)
+int parse_resp_request(const string &buf, vector<string> &cmd, size_t &consumed, size_t &start)
 {
-    size_t pos = 0;
+    size_t pos = start;
     long long count = 0;
     int r = read_number_line(buf, pos, '*', count);
     if (r != PARSE_OK)
@@ -78,7 +78,7 @@ int parse_resp_request(const string &buf, vector<string> &cmd, size_t &consumed)
         cmd.push_back(buf.substr(pos, len));
         pos += len + 2;
     }
-    consumed = pos;
+    consumed = pos - start;
     return PARSE_OK;
 }
 
